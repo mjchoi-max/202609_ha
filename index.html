@@ -696,25 +696,43 @@ class Component extends DCLogic {
       window.google.script.run.withSuccessHandler(apply).getFunds();
       return;
     }
-    // ② 외부 호스팅(GitHub Pages 등): CORS 제약이 있으므로 JSONP로 …/exec 요청
     const url = this.GSHEET_URL;
     if (!url) return;
-    const cb = '__funds_cb_' + Date.now();
-    const cleanup = (s) => { try { delete window[cb]; } catch (e) { window[cb] = undefined; } if (s && s.parentNode) s.parentNode.removeChild(s); };
-    window[cb] = (data) => { this._fundSynced = true; apply(data); cleanup(script); };
-    const script = document.createElement('script');
-    // data=1 : Apps Script doGet이 페이지 대신 JSON(P)을 반환하도록 하는 표시
-    script.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'data=1&callback=' + cb + '&t=' + Date.now();
-    // 연동 실패 시에도 페이지는 입력된 고정 값으로 정상 표시 (조용히 무시)
-    // 3회 연속 실패하면 자동 갱신을 멈춤 (불필요한 재요청·버벅임 방지)
-    script.onerror = () => {
-      cleanup(script);
-      if (this._fundSynced) return;
-      this._fundFails = (this._fundFails || 0) + 1;
-      if (this._fundFails >= 3 && this._fundTimer) { clearInterval(this._fundTimer); this._fundTimer = null; }
+    const DBG = !!window.__fundDebug;   // 콘솔에서 window.__fundDebug = true 로 켜면 진행 상황 출력
+    const log = (...a) => { if (DBG) console.log('[모금연동]', ...a); };
+
+    // ③ JSONP (fetch 가 막힌 환경용 예비 통로)
+    const jsonp = () => {
+      const cb = '__funds_cb_' + Date.now();
+      const cleanup = (s) => { try { delete window[cb]; } catch (e) { window[cb] = undefined; } if (s && s.parentNode) s.parentNode.removeChild(s); };
+      window[cb] = (data) => { this._fundSynced = true; log('JSONP 성공', data); apply(data); cleanup(script); };
+      const script = document.createElement('script');
+      // data=1 : Apps Script doGet이 페이지 대신 JSON(P)을 반환하도록 하는 표시
+      script.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'data=1&callback=' + cb + '&t=' + Date.now();
+      // 연동 실패 시에도 페이지는 입력된 고정 값으로 정상 표시 (조용히 무시)
+      // 5회 연속 실패하면 자동 갱신을 멈춤 (불필요한 재요청·버벅임 방지)
+      script.onerror = () => {
+        cleanup(script);
+        log('JSONP 실패');
+        if (this._fundSynced) return;
+        this._fundFails = (this._fundFails || 0) + 1;
+        if (this._fundFails >= 5 && this._fundTimer) { clearInterval(this._fundTimer); this._fundTimer = null; }
+      };
+      setTimeout(() => cleanup(script), 12000);
+      document.body.appendChild(script);
     };
-    setTimeout(() => cleanup(script), 12000);
-    document.body.appendChild(script);
+
+    // ② 외부 호스팅(GitHub Pages 등): 우선 fetch 로 요청하고, 막히면 JSONP 로 재시도
+    if (typeof fetch === 'function') {
+      const src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'data=1&t=' + Date.now();
+      log('fetch 시도', src);
+      fetch(src, { method: 'GET', redirect: 'follow' })
+        .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+        .then(d => { this._fundSynced = true; this._fundFails = 0; log('fetch 성공', d); apply(d); })
+        .catch(err => { log('fetch 실패 → JSONP 로 재시도', err && err.message); jsonp(); });
+      return;
+    }
+    jsonp();
   }
 
   applyTweaks() {
